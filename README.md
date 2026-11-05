@@ -1,4 +1,4 @@
-# wallpaper-zig (proof of concept)
+# Stillwave (proof of concept)
 
 CLI-only local video wallpapers, implemented in Zig using Wayland layer-shell,
 EGL/OpenGL, and libmpv. A wallpaper uses the **background** layer: ordinary
@@ -36,22 +36,45 @@ zig build -Doptimize=ReleaseSafe
 zig build test
 python3 tests/cli.py
 python3 tests/wayland.py
+python3 tests/install.py  # uses a temporary HOME, never your actual user bin
 ```
 
-Executable: `zig-out/bin/wallpaper-zig`. No package installation or downloads
+Executable: `zig-out/bin/stillwave`. No package installation or downloads
 happen during a build. Standard protocol XMLs default to
 `/usr/share/wayland-protocols`; override with
 `-Dwayland-protocols=/absolute/path` if necessary. C bindings use
 `zig translate-c` because this compiler no longer provides `@cImport`.
 Other Zig releases and cross-compilation have not been validated.
 
+## User-level installation
+
+```sh
+zig build install-system -Doptimize=ReleaseSafe
+stillwave --version
+```
+
+Despite the step name, this is a **user-level** install: it builds and copies only
+`stillwave` to `$HOME/.local/bin/stillwave`, creating the directory if needed and
+setting executable permissions (0755). `~/.local/bin` is already on PATH in the
+original development machine's `config.fish`; on other machines, add it to your
+shell's PATH yourself. No sudo or shell configuration changes are needed here.
+
+This explicit step replaces any existing binary at that destination; run it again
+to update or reinstall. It requires an absolute `HOME` and the Linux `install`
+utility. `--prefix` still controls ordinary `zig build` installation, but does not
+change this step's user-level destination. Ordinary builds do not install to your
+PATH. No config files, libraries, desktop settings, or startup services are
+installed or changed, and playback is not started.
+
+To uninstall, remove `$HOME/.local/bin/stillwave`; your configuration stays intact.
+
 ## Try your video
 
 From this project directory:
 
 ```sh
-./zig-out/bin/wallpaper-zig list-outputs
-./zig-out/bin/wallpaper-zig run --no-config ./11526981-uhd_3840_2160_30fps.mp4
+./zig-out/bin/stillwave list-outputs
+./zig-out/bin/stillwave run --no-config ./11526981-uhd_3840_2160_30fps.mp4
 ```
 
 The second command uses defaults on **all connected displays**. Run in the
@@ -61,7 +84,7 @@ desktop configuration is installed.
 Select a subset using exact names returned by output discovery:
 
 ```sh
-./zig-out/bin/wallpaper-zig run --no-config \
+./zig-out/bin/stillwave run --no-config \
   --output DISPLAY_NAME_1 --output DISPLAY_NAME_2 /path/to/video.mp4
 ```
 
@@ -90,8 +113,8 @@ edits its configuration, or raises the video above application windows.
 
 Default file:
 
-- `$XDG_CONFIG_HOME/wallpaper-zig/config.json` when XDG_CONFIG_HOME is absolute
-- otherwise `$HOME/.config/wallpaper-zig/config.json`
+- `$XDG_CONFIG_HOME/stillwave/config.json` when XDG_CONFIG_HOME is absolute
+- otherwise `$HOME/.config/stillwave/config.json`
 
 Unset, empty, or relative XDG_CONFIG_HOME uses the fallback. Without a usable
 HOME/XDG base, use `--config /path/to/config.json` or `--no-config`.
@@ -144,16 +167,16 @@ tested. A JSON Schema validator is not required at runtime.
 
 ```sh
 # Print a template (redirect to a NEW file of your choice if desired).
-./zig-out/bin/wallpaper-zig config defaults
+./zig-out/bin/stillwave config defaults
 
 # Inspect fully merged settings, without Wayland or playback.
-./zig-out/bin/wallpaper-zig config show --config /path/to/config.json
+./zig-out/bin/stillwave config show --config /path/to/config.json
 
 # Check structure/values without loading media or connecting to Wayland.
-./zig-out/bin/wallpaper-zig config validate --config /path/to/config.json
+./zig-out/bin/stillwave config validate --config /path/to/config.json
 
 # Override a file's outputs back to all, or override booleans explicitly.
-./zig-out/bin/wallpaper-zig run --all-outputs --no-loop --mute
+./zig-out/bin/stillwave run --all-outputs --no-loop --mute
 ```
 
 `config show` accepts the same setting overrides as `run` and prints normalized

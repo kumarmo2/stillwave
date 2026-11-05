@@ -9,7 +9,7 @@ pub fn main(init: std.process.Init) void {
     const a = init.arena.allocator();
     var d: support.Diagnostic = .{};
     execute(init, a, &d) catch |err| {
-        if (d.message.len > 0) std.debug.print("wallpaper-zig: {s}\n", .{d.message}) else std.debug.print("wallpaper-zig: {s}\n", .{@errorName(err)});
+        if (d.message.len > 0) std.debug.print("stillwave: {s}\n", .{d.message}) else std.debug.print("stillwave: {s}\n", .{@errorName(err)});
         c.exit(if (err == error.InvalidInput) 2 else 1);
     };
 }
@@ -19,7 +19,7 @@ fn execute(init: std.process.Init, a: std.mem.Allocator, d: *support.Diagnostic)
     const o = try cli.parse(a, args, d);
     switch (o.command) {
         .help => return support.stdout(cli.help),
-        .version => return support.stdout("wallpaper-zig 0.1.0-poc\n"),
+        .version => return support.stdout("stillwave 0.1.0-poc\n"),
         .defaults => return support.json(a, config.Config{}),
         .list_outputs => return app.listOutputs(a, o.json),
         else => {},

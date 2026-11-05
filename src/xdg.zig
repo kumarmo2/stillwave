@@ -5,11 +5,11 @@ const Allocator = std.mem.Allocator;
 pub fn configPath(a: Allocator, xdg: ?[]const u8, home: ?[]const u8) ![]const u8 {
     if (xdg) |base| {
         if (std.fs.path.isAbsolute(base))
-            return std.fs.path.join(a, &.{ base, "wallpaper-zig", "config.json" });
+            return std.fs.path.join(a, &.{ base, "stillwave", "config.json" });
     }
     if (home) |base| {
         if (std.fs.path.isAbsolute(base))
-            return std.fs.path.join(a, &.{ base, ".config", "wallpaper-zig", "config.json" });
+            return std.fs.path.join(a, &.{ base, ".config", "stillwave", "config.json" });
     }
     return error.ConfigDirectoryUnavailable;
 }
@@ -25,11 +25,11 @@ pub fn resolve(a: Allocator, base: []const u8, path: []const u8) ![]const u8 {
 test "XDG config absolute path, empty/relative fallback, missing home" {
     const a = std.testing.allocator;
     const cases = [_]struct { xdg: ?[]const u8, home: ?[]const u8, expected: []const u8 }{
-        .{ .xdg = "/cfg", .home = "/home/test", .expected = "/cfg/wallpaper-zig/config.json" },
-        .{ .xdg = "", .home = "/home/test", .expected = "/home/test/.config/wallpaper-zig/config.json" },
-        .{ .xdg = "relative", .home = "/home/test", .expected = "/home/test/.config/wallpaper-zig/config.json" },
-        .{ .xdg = null, .home = "/home/test", .expected = "/home/test/.config/wallpaper-zig/config.json" },
-        .{ .xdg = "/cfg", .home = null, .expected = "/cfg/wallpaper-zig/config.json" },
+        .{ .xdg = "/cfg", .home = "/home/test", .expected = "/cfg/stillwave/config.json" },
+        .{ .xdg = "", .home = "/home/test", .expected = "/home/test/.config/stillwave/config.json" },
+        .{ .xdg = "relative", .home = "/home/test", .expected = "/home/test/.config/stillwave/config.json" },
+        .{ .xdg = null, .home = "/home/test", .expected = "/home/test/.config/stillwave/config.json" },
+        .{ .xdg = "/cfg", .home = null, .expected = "/cfg/stillwave/config.json" },
     };
     for (cases) |case| {
         const got = try configPath(a, case.xdg, case.home);

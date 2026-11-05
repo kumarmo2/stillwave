@@ -215,7 +215,7 @@ pub const Surface = struct {
         self.* = .{ .output = o, .scale_120 = @as(u32, @intCast(o.scale)) * 120 };
         errdefer self.deinit();
         self.wl = c.wl_compositor_create_surface(client.compositor) orelse return error.SurfaceCreationFailed;
-        self.layer = c.zwlr_layer_shell_v1_get_layer_surface(client.shell, self.wl, o.proxy, c.ZWLR_LAYER_SHELL_V1_LAYER_BACKGROUND, "wallpaper-zig") orelse return error.LayerSurfaceCreationFailed;
+        self.layer = c.zwlr_layer_shell_v1_get_layer_surface(client.shell, self.wl, o.proxy, c.ZWLR_LAYER_SHELL_V1_LAYER_BACKGROUND, "stillwave") orelse return error.LayerSurfaceCreationFailed;
         _ = c.zwlr_layer_surface_v1_add_listener(self.layer, &layer_listener, self);
         c.zwlr_layer_surface_v1_set_size(self.layer, 0, 0);
         c.zwlr_layer_surface_v1_set_anchor(self.layer, c.ZWLR_LAYER_SURFACE_V1_ANCHOR_TOP | c.ZWLR_LAYER_SURFACE_V1_ANCHOR_BOTTOM | c.ZWLR_LAYER_SURFACE_V1_ANCHOR_LEFT | c.ZWLR_LAYER_SURFACE_V1_ANCHOR_RIGHT);

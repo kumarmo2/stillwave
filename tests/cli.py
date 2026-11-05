@@ -7,11 +7,11 @@ import subprocess
 import sys
 import tempfile
 
-binary = Path(sys.argv[1] if len(sys.argv) > 1 else "zig-out/bin/wallpaper-zig").resolve()
+binary = Path(sys.argv[1] if len(sys.argv) > 1 else "zig-out/bin/stillwave").resolve()
 root = Path(__file__).resolve().parents[1]
 checks = 0
 
-with tempfile.TemporaryDirectory(prefix="wallpaper-zig-test-") as tmp:
+with tempfile.TemporaryDirectory(prefix="stillwave-test-") as tmp:
     base = Path(tmp)
     home = base / "home"
     home.mkdir()
@@ -27,12 +27,15 @@ with tempfile.TemporaryDirectory(prefix="wallpaper-zig-test-") as tmp:
         assert result.returncode == status, (args, result.returncode, result.stderr)
         if status:
             assert not result.stdout, (args, result.stdout)
-            assert result.stderr.startswith("wallpaper-zig:"), result.stderr
+            assert result.stderr.startswith("stillwave:"), result.stderr
         checks += 1
         return result
 
-    assert "Usage:" in run("--help").stdout
-    assert "poc" in run("--version").stdout
+    help_text = run("--help").stdout
+    assert "Usage:" in help_text and "stillwave run" in help_text
+    assert "$XDG_CONFIG_HOME/stillwave/config.json" in help_text
+    version = run("--version").stdout
+    assert version.startswith("stillwave ") and "poc" in version
     defaults = json.loads(run("config", "defaults").stdout)
     assert defaults == json.loads((root / "examples/config.json").read_text())
     schema = json.loads((root / "config.schema.json").read_text())
@@ -47,7 +50,7 @@ with tempfile.TemporaryDirectory(prefix="wallpaper-zig-test-") as tmp:
     assert json.loads(run("config", "show").stdout) == defaults
     assert not (base / "config").exists(), "reading defaults created a config directory"
 
-    cfg_dir = base / "config" / "wallpaper-zig"
+    cfg_dir = base / "config" / "stillwave"
     cfg_dir.mkdir(parents=True)
     cfg_path = cfg_dir / "config.json"
     cfg_path.write_text(json.dumps({"media": "clips/with space.mp4", "outputs": ["left", "portrait"], "mute": False, "loop": False}))
@@ -112,7 +115,7 @@ with tempfile.TemporaryDirectory(prefix="wallpaper-zig-test-") as tmp:
     cfg_path.write_bytes(b" " * (1024 * 1024 + 1))
     run("config", "show", status=2)
 
-    fallback = home / ".config" / "wallpaper-zig"
+    fallback = home / ".config" / "stillwave"
     fallback.mkdir(parents=True)
     (fallback / "config.json").write_text('{"scale":"fit"}')
     for value in ("", "relative"):

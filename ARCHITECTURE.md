@@ -1,4 +1,4 @@
-# Architecture and roadmap
+# Stillwave: architecture and roadmap
 
 This document explains **how the current program fits together**, why it is
 structured this way, and where it can go next. It is also a reading guide for
@@ -101,6 +101,7 @@ Links point to hand-written source, not generated bindings.
 | [src/support.zig](src/support.zig) | Diagnostics and small libc-backed I/O helpers | `Diagnostic`, `readFile`, `json` |
 | [src/native.h](src/native.h), [src/c.zig](src/c.zig) | Native API declaration boundary | Generated `native` module import |
 | [build.zig](build.zig) | Build graph, generated code, native library linkage, tests | `build` |
+| [scripts/install-system.sh](scripts/install-system.sh) | Resolve current HOME and copy the binary on explicit request | `zig build install-system` |
 
 `app.zig` is currently the concrete Wayland orchestrator, **not** an established
 cross-platform backend interface. `listOutputs` also formats CLI output, and
@@ -168,7 +169,7 @@ For example, `--no-loop` must override `"loop": true`; `--all-outputs` must clea
 a file's selected names rather than leave them unchanged.
 
 Configuration discovery uses an absolute `$XDG_CONFIG_HOME`, otherwise
-`$HOME/.config`, under `wallpaper-zig/config.json`. An absent implicit file is
+`$HOME/.config`, under `stillwave/config.json`. An absent implicit file is
 fine; a missing explicit `--config` file is an error. Reads do not create or
 rewrite configuration files.
 
@@ -378,7 +379,7 @@ flowchart TD
     TRANSLATE --> BINDINGS[Generated Zig native module]
     BINDINGS --> LINK[Compile Zig and link system libraries]
     GENERATED --> LINK
-    LINK --> EXE[wallpaper-zig executable]
+    LINK --> EXE[stillwave executable]
 ```
 
 `build.zig` describes this dependency graph. Protocol-generated C is compiled;
@@ -393,7 +394,11 @@ not mean the wallpaper opens an xdg-shell application window.
 Generated files live in `.zig-cache`, and the installed executable is under
 `zig-out/bin`. Runtime uses linked system libraries; the executable is not a
 self-contained Zig implementation of video decoding or a bundled mpv binary.
-No network fetch is performed by the build.
+No network fetch is performed by the build. The optional `zig build install-system`
+step builds and copies the executable to `$HOME/.local/bin/stillwave` with mode
+0755, independently of `--prefix`. It is an explicit user-level install, not a
+system-wide install or part of ordinary builds; it neither changes shell settings
+nor starts playback. Subsequent installs replace the destination binary.
 
 The current compiler is Zig 0.17.0. This installation uses `zig translate-c`
 instead of `@cImport`; examples from older Zig releases may not match its build,
@@ -406,6 +411,7 @@ I/O, allocator, or C-interoperability APIs.
 | Zig tests | `test` blocks in source, collected by `main.zig` | CLI/configuration rules, XDG paths, pixel-size calculations, pacing state transitions |
 | CLI integration | [tests/cli.py](tests/cli.py) | Real executable, temporary config/filesystem cases, overrides, JSON output, error paths, no unintended writes |
 | Synthetic Wayland | [tests/wayland.py](tests/wayland.py) | Several fake outputs with arbitrary geometry/scales/rotations, older naming protocols, missing layer-shell errors |
+| User-level installation | [tests/install.py](tests/install.py) | Temporary HOME, directory creation, executable permissions, replacement/reinstall, invalid HOME rejection; uses normal compiler caches |
 | Authorized live checks | Development testing, not an automated suite | Visible video, NVDEC on the development GPU, graceful termination, hidden-frame regression |
 
 The fake server tests do not render pixels or prove actual mixed-monitor

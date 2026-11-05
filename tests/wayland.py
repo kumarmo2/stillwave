@@ -10,7 +10,7 @@ import sys
 import tempfile
 import threading
 
-binary = Path(sys.argv[1] if len(sys.argv) > 1 else "zig-out/bin/wallpaper-zig").resolve()
+binary = Path(sys.argv[1] if len(sys.argv) > 1 else "zig-out/bin/stillwave").resolve()
 
 def u(*values):
     return struct.pack("=" + "I" * len(values), *values)

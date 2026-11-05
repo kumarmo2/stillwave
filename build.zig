@@ -35,8 +35,19 @@ pub fn build(b: *std.Build) void {
     mod.addImport("native", native);
     for ([_][]const u8{ "wayland-client", "wayland-egl", "EGL", "GL", "mpv" }) |lib|
         mod.linkSystemLibrary(lib, .{});
-    const exe = b.addExecutable(.{ .name = "wallpaper-zig", .root_module = mod });
+    const exe = b.addExecutable(.{ .name = "stillwave", .root_module = mod });
     b.installArtifact(exe);
+
+    // This opt-in step installs for the invoking user, independently of --prefix.
+    const install_system = b.step("install-system", "Install Stillwave to $HOME/.local/bin (no sudo)");
+    // Resolve HOME at execution time, not in Zig\'s cached build configuration.
+    const install = b.addSystemCommand(&.{"sh"});
+    install.addFileArg(b.path("scripts/install-system.sh"));
+    install.addArtifactArg(exe);
+    // Always copy again, including when the installed file was removed/changed.
+    install.has_side_effects = true;
+    install_system.dependOn(&install.step);
+
     const run = b.addRunArtifact(exe);
     run.addPassthruArgs();
     b.step("run", "Run the CLI").dependOn(&run.step);

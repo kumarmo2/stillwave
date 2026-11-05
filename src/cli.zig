@@ -9,14 +9,14 @@ pub const Options = struct {
     json: bool = false,
 };
 pub const help =
-    \\wallpaper-zig — local video wallpapers for layer-shell Wayland compositors
+    \\stillwave — local video wallpapers for layer-shell Wayland compositors
     \\
     \\Usage:
-    \\  wallpaper-zig run [OPTIONS] [VIDEO]
-    \\  wallpaper-zig list-outputs [--json]
-    \\  wallpaper-zig config defaults
-    \\  wallpaper-zig config show [OPTIONS] [VIDEO]
-    \\  wallpaper-zig config validate [OPTIONS]
+    \\  stillwave run [OPTIONS] [VIDEO]
+    \\  stillwave list-outputs [--json]
+    \\  stillwave config defaults
+    \\  stillwave config show [OPTIONS] [VIDEO]
+    \\  stillwave config validate [OPTIONS]
     \\
     \\Options:
     \\  --config PATH           Explicit JSON file
@@ -32,8 +32,8 @@ pub const help =
     \\  --help / --version
     \\  --                      End options (for paths starting with '-')
     \\
-    \\Config: $XDG_CONFIG_HOME/wallpaper-zig/config.json
-    \\        fallback: $HOME/.config/wallpaper-zig/config.json
+    \\Config: $XDG_CONFIG_HOME/stillwave/config.json
+    \\        fallback: $HOME/.config/stillwave/config.json
     \\Precedence: defaults < JSON file < CLI overrides. No implicit config writes.
     \\Runs in foreground; Ctrl-C or SIGTERM stops it. No shell/WM-specific IPC.
     \\
@@ -127,7 +127,7 @@ test "CLI supports many outputs, false overrides, all, and literal paths" {
     defer arena.deinit();
     const a = arena.allocator();
     var d: support.Diagnostic = .{};
-    const o = try parse(a, &.{ "wallpaper-zig", "run", "--output", "A", "--output", "B", "--no-mute", "--", "-clip.mp4" }, &d);
+    const o = try parse(a, &.{ "stillwave", "run", "--output", "A", "--output", "B", "--no-mute", "--", "-clip.mp4" }, &d);
     try std.testing.expect(o.overrides.outputs.?.len == 2);
     try std.testing.expect(o.overrides.mute.? == false);
     try std.testing.expectEqualStrings("-clip.mp4", o.overrides.media.?);
