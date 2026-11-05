@@ -5,6 +5,9 @@ EGL/OpenGL, and libmpv. A wallpaper uses the **background** layer: ordinary
 applications appear above it. It requests no keyboard focus and has an empty
 pointer input region.
 
+For a beginner-friendly implementation map, diagrams, Zig reading guide, and
+future plans, see [Architecture and roadmap](ARCHITECTURE.md).
+
 **Status:** builds with the installed Zig 0.17.0. Unit tests, non-visual CLI
 integration tests, synthetic multi-output Wayland discovery tests, and real
 output discovery pass. Follow-up authorized desktop tests verified NVDEC decoding,
