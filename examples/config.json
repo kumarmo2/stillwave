@@ -1,0 +1,11 @@
+{
+  "schema_version": 1,
+  "media": null,
+  "outputs": [],
+  "scale": "fill",
+  "loop": true,
+  "mute": true,
+  "hwdec": "auto",
+  "paused": false,
+  "log_level": "info"
+}

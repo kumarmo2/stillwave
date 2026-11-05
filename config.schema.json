@@ -1,0 +1,78 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "wallpaper-zig configuration v1",
+  "type": "object",
+  "additionalProperties": false,
+  "properties": {
+    "schema_version": {
+      "type": "integer",
+      "const": 1,
+      "default": 1
+    },
+    "media": {
+      "type": [
+        "string",
+        "null"
+      ],
+      "minLength": 1,
+      "not": {
+        "type": "string",
+        "pattern": "\\u0000"
+      },
+      "default": null,
+      "description": "Local file path. Relative paths are relative to this config file; null is a template, not runnable."
+    },
+    "outputs": {
+      "type": "array",
+      "items": {
+        "type": "string",
+        "minLength": 1,
+        "not": {
+          "pattern": "\\u0000"
+        }
+      },
+      "uniqueItems": true,
+      "default": [],
+      "description": "Empty means all connected displays, including future hotplug. Otherwise exact discovered names."
+    },
+    "scale": {
+      "type": "string",
+      "enum": [
+        "fill",
+        "fit"
+      ],
+      "default": "fill"
+    },
+    "loop": {
+      "type": "boolean",
+      "default": true
+    },
+    "mute": {
+      "type": "boolean",
+      "default": true
+    },
+    "hwdec": {
+      "type": "string",
+      "enum": [
+        "auto",
+        "no"
+      ],
+      "default": "auto"
+    },
+    "paused": {
+      "type": "boolean",
+      "default": false
+    },
+    "log_level": {
+      "type": "string",
+      "enum": [
+        "quiet",
+        "error",
+        "warn",
+        "info",
+        "debug"
+      ],
+      "default": "info"
+    }
+  }
+}

@@ -1,0 +1,22 @@
+#define _GNU_SOURCE 1
+#include <wayland-client.h>
+#include <wayland-egl.h>
+#include "wlr-layer-shell-client-protocol.h"
+#include "xdg-output-client-protocol.h"
+#include "viewporter-client-protocol.h"
+#include "fractional-scale-client-protocol.h"
+#include <EGL/egl.h>
+#include <GL/gl.h>
+#include <mpv/client.h>
+#include <mpv/render_gl.h>
+#include <unistd.h>
+#include <fcntl.h>
+#include <poll.h>
+#include <signal.h>
+#include <errno.h>
+#include <stdlib.h>
+#include <string.h>
+#include <stdio.h>
+#include <sys/stat.h>
+#include <sys/eventfd.h>
+#include <sys/signalfd.h>

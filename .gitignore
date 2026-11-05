@@ -1,0 +1,8 @@
+.zig-cache/
+zig-out/
+*.mp4
+*.webm
+*.mkv
+*.mov
+SESSION_PLAN.md
+__pycache__/
