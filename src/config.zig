@@ -5,11 +5,13 @@ const c = @import("c.zig").api;
 const Allocator = std.mem.Allocator;
 const Diagnostic = support.Diagnostic;
 
+pub const Backend = enum { mpv, ffmpeg };
 pub const Scale = enum { fill, fit };
 pub const Hwdec = enum { auto, no };
 pub const LogLevel = enum { quiet, @"error", warn, info, debug };
 pub const Config = struct {
     schema_version: u32 = 1,
+    backend: Backend = .mpv,
     media: ?[]const u8 = null,
     // Empty means every output, including newly connected outputs.
     outputs: []const []const u8 = &.{},
@@ -28,6 +30,7 @@ pub const Config = struct {
     }
 };
 pub const Overrides = struct {
+    backend: ?Backend = null,
     media: ?[]const u8 = null,
     outputs: ?[]const []const u8 = null,
     scale: ?Scale = null,
@@ -69,6 +72,8 @@ pub fn parse(a: Allocator, bytes: []const u8, d: *Diagnostic) !Config {
                 names[i] = try a.dupe(u8, item.string);
             }
             cfg.outputs = names;
+        } else if (std.mem.eql(u8, key, "backend")) {
+            cfg.backend = try enumValue(Backend, a, key, v, d);
         } else if (std.mem.eql(u8, key, "scale")) {
             cfg.scale = try enumValue(Scale, a, key, v, d);
         } else if (std.mem.eql(u8, key, "hwdec")) {
@@ -108,6 +113,7 @@ pub fn validate(a: Allocator, cfg: Config, d: *Diagnostic) !void {
 }
 
 pub fn apply(cfg: *Config, overrides: Overrides) void {
+    if (overrides.backend) |v| cfg.backend = v;
     if (overrides.media) |v| cfg.media = v;
     if (overrides.outputs) |v| cfg.outputs = v;
     if (overrides.scale) |v| cfg.scale = v;
@@ -140,6 +146,7 @@ pub fn load(a: Allocator, source: Source, overrides: Overrides, d: *Diagnostic) 
 }
 
 pub fn validateRunnable(a: Allocator, cfg: Config, d: *Diagnostic) !void {
+    if (cfg.backend == .ffmpeg and !cfg.mute) return d.fail(a, "FFmpeg backend is muted-only; use --mute or --backend mpv for audio", .{});
     const media = cfg.media orelse return d.fail(a, "no video specified; pass VIDEO or set media in JSON", .{});
     const z = try a.dupeSentinel(u8, media, 0);
     defer a.free(z);

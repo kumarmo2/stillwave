@@ -1,7 +1,7 @@
 # Stillwave (proof of concept)
 
 CLI-only local video wallpapers, implemented in Zig using Wayland layer-shell,
-EGL/OpenGL, and libmpv. A wallpaper uses the **background** layer: ordinary
+EGL/OpenGL, and libmpv (default) or an opt-in direct FFmpeg backend. A wallpaper uses the **background** layer: ordinary
 applications appear above it. It requests no keyboard focus and has an empty
 pointer input region.
 
@@ -24,6 +24,7 @@ package, and development headers/libraries for:
 - wayland-client and wayland-egl
 - EGL and desktop OpenGL
 - libmpv
+- libavformat, libavcodec, libavutil for the FFmpeg backend (omit with `-Dffmpeg=false`)
 
 These are already installed on the original development machine. No desktop
 shell or compositor-specific command/IPC is needed. Runtime wallpaper placement
@@ -36,6 +37,8 @@ zig build -Doptimize=ReleaseSafe
 zig build test
 python3 tests/cli.py
 python3 tests/wayland.py
+python3 tests/control.py  # real libmpv + offscreen Mesa; requires cc and ffmpeg
+python3 tests/ffmpeg.py   # integrated FFmpeg + native YUV shader tests; no CUDA/desktop
 python3 tests/install.py  # uses a temporary HOME, never your actual user bin
 ```
 
@@ -45,6 +48,49 @@ happen during a build. Standard protocol XMLs default to
 `-Dwayland-protocols=/absolute/path` if necessary. C bindings use
 `zig translate-c` because this compiler no longer provides `@cImport`.
 Other Zig releases and cross-compilation have not been validated.
+
+## Opt-in FFmpeg backend (same binary)
+
+```sh
+./zig-out/bin/stillwave run --backend ffmpeg --profile-startup /path/to/video.mp4 2>stillwave-ffmpeg.log
+# In another terminal: ./zig-out/bin/stillwave hide | show | quit
+```
+
+mpv remains the default. FFmpeg uses GPU YUV-to-RGB conversion, no CPU RGBA
+conversion or CUDA/GL interop, and releases decoder/CUDA and video-texture
+resources on hide while retaining EGL setup. It is muted-only and rejects
+unsupported native pixel formats/HDR; use mpv for those features. Existing
+output/scaling/control behavior is shared. See [FFmpeg backend details](FFMPEG_BACKEND.md)
+for build options, formats, nonblocking teardown, tests, and measurement caveats.
+NVIDIA performance/VRAM must be measured on the integrated path, not assumed from
+the earlier prototype.
+
+## Experimental FFmpeg lifecycle probe
+
+A separate decode-only prototype tests explicit decoder/CUDA-device teardown,
+without changing Stillwave or creating desktop surfaces:
+
+```sh
+zig build ffmpeg-probe -Doptimize=ReleaseSafe
+./zig-out/bin/ffmpeg-probe --decoder software /path/to/video.mp4
+```
+
+It starts hidden and accepts `show`, `hide`, and `quit` on stdin. See
+[the experiment guide](experiments/README.md) for CUDA mode, VRAM measurements,
+timing definitions, and software-only tests. It is not a wallpaper replacement
+and is not installed by ordinary builds or `install-system`.
+
+A second opt-in target adds one-output Wayland/OpenGL rendering without mpv:
+
+```sh
+zig build ffmpeg-render-probe -Doptimize=ReleaseSafe
+./zig-out/bin/ffmpeg-render-probe --decoder cuda /path/to/video.mp4
+```
+
+It also starts hidden and accepts `show`, `hide`, `quit` on stdin. See
+[rendering experiment instructions](experiments/RENDERING.md) for timing/VRAM
+measurements and limitations. These probes retain the original experiment paths;
+the integrated FFmpeg backend above uses a different, native-plane GPU renderer.
 
 ## User-level installation
 
@@ -109,6 +155,111 @@ doesn't appear, check your other wallpaper provider and manually disable only
 its wallpaper feature before retrying. This application never kills a shell,
 edits its configuration, or raises the video above application windows.
 
+## Hide, show, and quit from the same binary
+
+Keep one foreground process running:
+
+```sh
+# Terminal 1: normal configuration, with optional startup/resume measurements
+./zig-out/bin/stillwave run --profile-startup 2>startup.log
+
+# Terminal 2, or event-triggered scripts:
+./zig-out/bin/stillwave hide
+./zig-out/bin/stillwave show
+./zig-out/bin/stillwave quit
+```
+
+- `hide` unmaps the wallpaper and stops/unloads playback (not just pauses it).
+  This allows media/decoder resources to be released while retaining the player,
+  EGL window/context, and (for mpv) its renderer. FFmpeg additionally deletes video
+  textures and performs decoder/CUDA teardown off the control thread. Pending
+  updates are consumed without drawing or kept in a bounded latest-frame slot.
+- `show` remaps the wallpaper and starts the same video **from the beginning**.
+  It reloads media in the existing player, retaining expensive graphics resources.
+  A fresh configure handshake and new-file playback readiness precede presentation.
+  The configured `paused` setting is respected.
+- Repeated `hide` or `show` requests are harmless; `show` while visible does not
+  restart playback. Rapid requests converge on the latest requested state.
+- `quit` requests clean shutdown, including while hidden. Ctrl-C/SIGTERM still work.
+- These commands take no settings/arguments, do not load configuration, and fail
+  if there is no running instance. They never start a process automatically.
+
+`run` remains foreground-only: no daemon, service, or second executable is
+installed. A second `run` in the same user/Wayland session is rejected before
+graphics initialization. Use the **new locally built binary for both the owner
+and commands**; an older PATH installation does not understand these commands.
+
+Control uses a private Unix datagram socket and advisory lock in
+`$XDG_RUNTIME_DIR/stillwave-<session-hash>/`. The runtime directory must be absolute,
+owned by this user, and private (normally mode 0700). The Wayland display's
+canonical socket path identifies the session; clients must target the same
+session. Inherited `WAYLAND_SOCKET` connections are not supported for `run` or
+control commands. Socket files are removed on normal exit and recovered after a
+crash; a small private directory and lock file remain intentionally.
+
+A successful command acknowledges the requested state, **not** completion of the
+asynchronous playback transition or compositor presentation. Clients wait up to
+five seconds for that acknowledgement. No screen-visibility guarantee is made.
+Media/decoder allocations can be released on hide, but renderer caches, EGL back
+buffers, and driver allocations remain possible. **A particular VRAM reduction
+is not guaranteed**; measure on your GPU. Quit destroys the retained resources.
+Hotplugged outputs are initialized when next shown; removed outputs still release
+their resources. `--no-loop` exits at completion; FFmpeg permits a 500 ms final
+presentation grace if the compositor withholds callbacks (see backend details).
+
+The non-desktop lifecycle test uses a fake Wayland server and a test-only EGL
+shim with real libmpv and Mesa offscreen rendering. It checks command routing,
+remapping, completed hidden unload, presentation inactivity, context retention,
+rapid toggles, interrupted loading, delayed terminal events, paused restarts,
+EOF behavior, duplicate rejection, and crash recovery. Actual compositor /
+NVIDIA remapping and perceived resume latency still require desktop validation.
+
+## Startup profiling
+
+Use the locally built executable (an existing PATH installation is not updated by
+an ordinary build):
+
+```sh
+zig build -Doptimize=ReleaseSafe
+./zig-out/bin/stillwave run --profile-startup 2>startup.log
+# Or add --no-config /path/to/video.mp4 to bypass your usual config.
+```
+
+Timings go to stderr even with `--log-level quiet`; stdout stays unchanged.
+Each `[startup] +N ms [output] stage (D ms)` line reports monotonic elapsed
+wall time since entry to `main` and the duration of that named stage. This
+includes blocking/waiting, not just CPU work. It excludes shell and dynamic
+loader time before `main`. Failed stages have no completion line.
+
+Milestones cover argument/config loading, media validation, Wayland discovery,
+EGL setup, and each output's surface configure, mpv initialization/render
+context, worker load request, first FRAME update, first render and first swap.
+The load-to-FRAME interval includes decoder/media work and event-loop scheduling;
+it is not a pure decoding measurement. Outputs initialize serially, so one
+output's work can delay another's configure/frame observation. Durations can
+overlap and should not be summed.
+
+The first submitted frame is **not confirmed visible**: swap completion is not
+compositor presentation feedback, and a fullscreen window or another wallpaper
+provider may hide it. There is no per-frame profiling after the first submission;
+new hotplug surfaces get their own startup milestones. Compare several runs with
+the same video, outputs, and build mode; label the first run separately because
+filesystem and GPU shader caches can change subsequent timings. Ctrl-C stops
+playback normally. Without the flag, no timing lines are emitted.
+
+After each hide/show cycle, retained outputs also report
+`show to first frame submitted`. **The parenthesized duration is the show
+latency** from handling that command, including remapping and media reload;
+the `+N ms` prefix is still time since the original process entered `main`.
+Client process/IPC startup and actual compositor presentation are not included.
+
+After stopping playback, `playback unloaded (renderer retained)` confirms that
+mpv has reached `idle-active` (no file loaded). Its duration is measured from the
+worker issuing stop, not from the control client's launch. Wait for this marker
+before sampling hidden VRAM. It confirms playback unloading, **not** that the GPU
+driver has returned a specific amount of memory. Compare visible, unloaded-hidden,
+and post-quit memory, along with the show latency.
+
 ## JSON configuration
 
 Default file:
@@ -133,6 +284,7 @@ Complete defaults (also in `examples/config.json`):
 ```json
 {
   "schema_version": 1,
+  "backend": "mpv",
   "media": null,
   "outputs": [],
   "scale": "fill",
@@ -147,18 +299,19 @@ Complete defaults (also in `examples/config.json`):
 Omitted fields use defaults. `media: null` is a valid template, but playback
 requires a readable regular local file. Relative media paths in JSON are resolved
 against the config file's directory; CLI video paths are relative to the current
-directory. Paths are passed directly to libmpv, never through a shell. There is
+directory. Paths are passed directly to the selected backend, never through a shell. There is
 no implicit `~` or environment-variable expansion inside JSON.
 
 | Setting | Values / meaning |
 | --- | --- |
 | `schema_version` | `1` (also assumed when omitted) |
+| `backend` | `mpv` (default) or `ffmpeg` (opt-in, muted-only) |
 | `media` | Local video path or `null` |
 | `outputs` | Array of unique names; `[]` means all |
 | `scale` | `fill` crops preserving aspect; `fit` letterboxes in black |
 | `loop` | `true` loops; `false` exits when all current players reach EOF |
-| `mute` | `true` disables audio; `false` makes only one output's player audible |
-| `hwdec` | `auto` uses libmpv auto-safe with software fallback; `no` disables |
+| `mute` | `true` disables audio; `false` makes one mpv player audible (unsupported in FFmpeg) |
+| `hwdec` | `auto`: mpv auto-safe or FFmpeg CUDA with early software fallback; `no`: software decoding |
 | `paused` | Start paused; no runtime resume command in this POC |
 | `log_level` | `quiet`, `error`, `warn`, `info`, `debug` |
 
@@ -182,7 +335,7 @@ tested. A JSON Schema validator is not required at runtime.
 `config show` accepts the same setting overrides as `run` and prints normalized
 JSON with absolute media paths. `config validate` distinguishes a template from
 a config with media, but does **not** verify file existence or codec support;
-`run` checks file readability and libmpv checks decoding.
+`run` checks file readability and the selected backend checks decoding/features.
 
 Use `--help` for all flags. Options use separate values (`--hwdec no`, not
 `--hwdec=no`). Contradictory/repeated setting flags are rejected.
@@ -201,6 +354,8 @@ or unsupported required protocol/selection, **1** runtime/system failure.
   configure acknowledgments, input transparency, scaling and frame callbacks.
 - `src/render/egl.zig`: EGL/OpenGL presentation.
 - `src/render/pacing.zig`: per-output presentation/skip state and regression tests.
+- `src/backend.zig`: backend-neutral playback adapter; `src/ffmpeg.zig`,
+  `src/ffmpeg_decoder.c`, `src/render/yuv.c`: direct decoding/native YUV GPU rendering.
 - `src/player.zig`: libmpv options/rendering, per-player event thread, atomics
   and eventfd wakeups. Render callbacks never invoke Wayland/GL/libmpv.
 

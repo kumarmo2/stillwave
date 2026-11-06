@@ -18,6 +18,7 @@ with tempfile.TemporaryDirectory(prefix="stillwave-test-") as tmp:
     env = os.environ | {
         "HOME": str(home),
         "XDG_CONFIG_HOME": str(base / "config"),
+        "XDG_RUNTIME_DIR": str(base),
         "WAYLAND_DISPLAY": str(base / "not-a-wayland-socket"),
     }
     def run(*args, status=0, overrides=None, cwd=base):
@@ -47,6 +48,11 @@ with tempfile.TemporaryDirectory(prefix="stillwave-test-") as tmp:
     else:
         jsonschema.Draft202012Validator.check_schema(schema)
         jsonschema.validate(defaults, schema)
+    assert defaults["backend"] == "mpv"
+    assert json.loads(run("config", "show", "--backend", "ffmpeg").stdout)["backend"] == "ffmpeg"
+    run("config", "show", "--backend", "bad", status=2)
+    run("run", "--backend", "ffmpeg", "--no-mute", "--no-config", status=2)
+    run("run", "--backend", "mpv", "--backend", "ffmpeg", status=2)
     assert json.loads(run("config", "show").stdout) == defaults
     assert not (base / "config").exists(), "reading defaults created a config directory"
 
@@ -81,7 +87,31 @@ with tempfile.TemporaryDirectory(prefix="stillwave-test-") as tmp:
     # No playback is started: run rejects media before connecting to Wayland.
     fake_video = base / "exists.mp4"
     fake_video.write_bytes(b"not really a video")
-    assert "WaylandConnectionFailed" in run("run", "--no-config", str(fake_video), status=1).stderr
+    plain = run("run", "--no-config", str(fake_video), status=1)
+    assert "WaylandConnectionFailed" in plain.stderr
+    assert "[startup]" not in plain.stderr
+    profiled = subprocess.run(
+        [str(binary), "run", "--profile-startup", "--log-level", "quiet",
+         "--no-config", str(fake_video)],
+        env=env, cwd=base, capture_output=True, text=True, timeout=10)
+    assert profiled.returncode == 1 and not profiled.stdout
+    milestones = [line for line in profiled.stderr.splitlines() if line.startswith("[startup]")]
+    assert len(milestones) == 3, profiled.stderr
+    assert "arguments parsed" in milestones[0]
+    assert "configuration loaded" in milestones[1]
+    assert "media validated" in milestones[2]
+    elapsed = [float(line.split()[1][1:]) for line in milestones]
+    assert elapsed == sorted(elapsed), milestones
+    assert "WaylandConnectionFailed" in profiled.stderr
+    checks += 1
+    run("run", "--profile-startup", "--profile-startup", status=2)
+    run("config", "show", "--profile-startup", status=2)
+    run("list-outputs", "--profile-startup", status=2)
+    for control in ("hide", "show", "quit"):
+        assert "no running instance" in run(control, status=1).stderr
+        run(control, "--config", "ignored.json", status=2)
+        run(control, "extra", status=2)
+        run(control, "--help")
 
     for invalid in ['[]', '{', '{"mute":null}', '{"schema_version":2}',
                     '{"mute":true,"mute":false}', '{"extra":1}',

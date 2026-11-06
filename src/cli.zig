@@ -1,18 +1,20 @@
 const std = @import("std");
 const config = @import("config.zig");
 const support = @import("support.zig");
-pub const Command = enum { help, version, run, list_outputs, defaults, show, validate };
+pub const Command = enum { help, version, run, list_outputs, defaults, show, validate, hide, reveal, quit };
 pub const Options = struct {
     command: Command = .help,
     source: config.Source = .{},
     overrides: config.Overrides = .{},
     json: bool = false,
+    profile_startup: bool = false,
 };
 pub const help =
     \\stillwave — local video wallpapers for layer-shell Wayland compositors
     \\
     \\Usage:
     \\  stillwave run [OPTIONS] [VIDEO]
+    \\  stillwave hide | show | quit
     \\  stillwave list-outputs [--json]
     \\  stillwave config defaults
     \\  stillwave config show [OPTIONS] [VIDEO]
@@ -23,12 +25,14 @@ pub const help =
     \\  --no-config             Ignore XDG config
     \\  --output NAME           Select display (repeatable); default: all
     \\  --all-outputs           Override configured display selection with all
+    \\  --backend mpv|ffmpeg    Playback backend (default: mpv; ffmpeg muted-only)
     \\  --scale fill|fit         Crop to fill (default) or letterbox
     \\  --hwdec auto|no          Opportunistic hardware decoding (default: auto)
     \\  --mute / --no-mute       Audio muted by default; unmuted on one output only
     \\  --loop / --no-loop       Loop by default; otherwise exit at EOF
     \\  --paused / --no-paused   Start paused (default: false)
     \\  --log-level LEVEL       quiet, error, warn, info (default), debug
+    \\  --profile-startup        Report startup wall-clock timings to stderr (run only)
     \\  --help / --version
     \\  --                      End options (for paths starting with '-')
     \\
@@ -36,6 +40,8 @@ pub const help =
     \\        fallback: $HOME/.config/stillwave/config.json
     \\Precedence: defaults < JSON file < CLI overrides. No implicit config writes.
     \\Runs in foreground; Ctrl-C or SIGTERM stops it. No shell/WM-specific IPC.
+    \\hide/show/quit control the existing run in this Wayland session.
+    \\hide unloads/unmaps; show starts from the beginning using retained contexts.
     \\
 ;
 
@@ -48,6 +54,11 @@ pub fn parse(a: std.mem.Allocator, args: []const []const u8, d: *support.Diagnos
     if (std.mem.eql(u8, cmd, "--version")) return .{ .command = .version };
     if (std.mem.eql(u8, cmd, "run")) {
         o.command = .run;
+    } else if (std.mem.eql(u8, cmd, "hide") or std.mem.eql(u8, cmd, "show") or std.mem.eql(u8, cmd, "quit")) {
+        if (args.len == 3 and (std.mem.eql(u8, args[2], "--help") or std.mem.eql(u8, args[2], "-h"))) return o;
+        if (args.len != 2) return d.fail(a, "{s} takes no arguments", .{cmd});
+        o.command = if (std.mem.eql(u8, cmd, "hide")) .hide else if (std.mem.eql(u8, cmd, "show")) .reveal else .quit;
+        return o;
     } else if (std.mem.eql(u8, cmd, "list-outputs")) {
         o.command = .list_outputs;
     } else if (std.mem.eql(u8, cmd, "config")) {
@@ -75,7 +86,10 @@ pub fn parse(a: std.mem.Allocator, args: []const []const u8, d: *support.Diagnos
             continue;
         }
         if (!positional and std.mem.startsWith(u8, arg, "--")) {
-            if (std.mem.eql(u8, arg, "--no-config")) {
+            if (std.mem.eql(u8, arg, "--profile-startup")) {
+                if (o.command != .run or o.profile_startup) return d.fail(a, "--profile-startup is run-only and cannot be repeated", .{});
+                o.profile_startup = true;
+            } else if (std.mem.eql(u8, arg, "--no-config")) {
                 if (o.source.disabled or o.source.path != null) return d.fail(a, "conflicting/repeated config selection", .{});
                 o.source.disabled = true;
             } else if (std.mem.eql(u8, arg, "--all-outputs")) {
@@ -97,6 +111,9 @@ pub fn parse(a: std.mem.Allocator, args: []const []const u8, d: *support.Diagnos
                 } else if (std.mem.eql(u8, arg, "--output")) {
                     if (all) return d.fail(a, "--output conflicts with --all-outputs", .{});
                     try outputs.append(a, value);
+                } else if (std.mem.eql(u8, arg, "--backend")) {
+                    if (o.overrides.backend != null) return d.fail(a, "repeated --backend", .{});
+                    o.overrides.backend = std.meta.stringToEnum(config.Backend, value) orelse return d.fail(a, "--backend: use mpv or ffmpeg", .{});
                 } else if (std.mem.eql(u8, arg, "--scale")) {
                     if (o.overrides.scale != null) return d.fail(a, "repeated --scale", .{});
                     o.overrides.scale = std.meta.stringToEnum(config.Scale, value) orelse return d.fail(a, "--scale: use fill or fit", .{});

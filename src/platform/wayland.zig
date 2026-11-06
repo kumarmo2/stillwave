@@ -206,6 +206,9 @@ pub const Surface = struct {
     scale_120: u32 = 120,
     fractional_received: bool = false,
     configured: bool = false,
+    enabled: bool = true,
+    remap_barrier: ?*c.wl_callback = null,
+    show_after_barrier: bool = false,
     closed: bool = false,
     dirty: bool = true,
     invalid: bool = false,
@@ -217,10 +220,7 @@ pub const Surface = struct {
         self.wl = c.wl_compositor_create_surface(client.compositor) orelse return error.SurfaceCreationFailed;
         self.layer = c.zwlr_layer_shell_v1_get_layer_surface(client.shell, self.wl, o.proxy, c.ZWLR_LAYER_SHELL_V1_LAYER_BACKGROUND, "stillwave") orelse return error.LayerSurfaceCreationFailed;
         _ = c.zwlr_layer_surface_v1_add_listener(self.layer, &layer_listener, self);
-        c.zwlr_layer_surface_v1_set_size(self.layer, 0, 0);
-        c.zwlr_layer_surface_v1_set_anchor(self.layer, c.ZWLR_LAYER_SURFACE_V1_ANCHOR_TOP | c.ZWLR_LAYER_SURFACE_V1_ANCHOR_BOTTOM | c.ZWLR_LAYER_SURFACE_V1_ANCHOR_LEFT | c.ZWLR_LAYER_SURFACE_V1_ANCHOR_RIGHT);
-        c.zwlr_layer_surface_v1_set_exclusive_zone(self.layer, -1);
-        c.zwlr_layer_surface_v1_set_keyboard_interactivity(self.layer, c.ZWLR_LAYER_SURFACE_V1_KEYBOARD_INTERACTIVITY_NONE);
+        self.applyLayerState();
         const region = c.wl_compositor_create_region(client.compositor) orelse return error.RegionCreationFailed;
         c.wl_surface_set_input_region(self.wl, region);
         c.wl_region_destroy(region);
@@ -233,7 +233,39 @@ pub const Surface = struct {
         }
         c.wl_surface_commit(self.wl);
     }
+    fn applyLayerState(self: *Surface) void {
+        c.zwlr_layer_surface_v1_set_size(self.layer, 0, 0);
+        c.zwlr_layer_surface_v1_set_anchor(self.layer, c.ZWLR_LAYER_SURFACE_V1_ANCHOR_TOP | c.ZWLR_LAYER_SURFACE_V1_ANCHOR_BOTTOM | c.ZWLR_LAYER_SURFACE_V1_ANCHOR_LEFT | c.ZWLR_LAYER_SURFACE_V1_ANCHOR_RIGHT);
+        c.zwlr_layer_surface_v1_set_exclusive_zone(self.layer, -1);
+        c.zwlr_layer_surface_v1_set_keyboard_interactivity(self.layer, c.ZWLR_LAYER_SURFACE_V1_KEYBOARD_INTERACTIVITY_NONE);
+    }
+    pub fn hide(self: *Surface) !void {
+        self.enabled = false;
+        self.configured = false;
+        self.show_after_barrier = false;
+        if (self.frame) |p| c.wl_callback_destroy(p);
+        self.frame = null;
+        self.pacing = .{};
+        if (self.remap_barrier) |p| c.wl_callback_destroy(p);
+        c.wl_surface_attach(self.wl, null, 0, 0);
+        c.wl_surface_commit(self.wl);
+        // Drain pre-unmap configure events before issuing a new initial commit.
+        self.remap_barrier = c.wl_display_sync(self.output.client.display) orelse return error.WaylandSyncFailed;
+        _ = c.wl_callback_add_listener(self.remap_barrier, &remap_listener, self);
+    }
+    pub fn show(self: *Surface) void {
+        if (self.remap_barrier != null) {
+            self.show_after_barrier = true;
+            return;
+        }
+        self.enabled = true;
+        self.configured = false;
+        self.dirty = true;
+        self.applyLayerState();
+        c.wl_surface_commit(self.wl);
+    }
     pub fn deinit(self: *Surface) void {
+        if (self.remap_barrier) |p| c.wl_callback_destroy(p);
         if (self.frame) |p| c.wl_callback_destroy(p);
         if (self.fractional) |p| c.wp_fractional_scale_v1_destroy(p);
         if (self.viewport) |p| c.wp_viewport_destroy(p);
@@ -265,6 +297,7 @@ pub const Surface = struct {
 };
 fn configure(data: ?*anyopaque, layer: ?*c.zwlr_layer_surface_v1, serial: u32, width: u32, height: u32) callconv(.c) void {
     const self = ptr(Surface, data);
+    if (!self.enabled) return;
     c.zwlr_layer_surface_v1_ack_configure(layer, serial);
     if (width == 0 or height == 0 or width > std.math.maxInt(i32) or height > std.math.maxInt(i32)) {
         self.invalid = true;
@@ -278,6 +311,16 @@ fn configure(data: ?*anyopaque, layer: ?*c.zwlr_layer_surface_v1, serial: u32, w
 fn closed(data: ?*anyopaque, _: ?*c.zwlr_layer_surface_v1) callconv(.c) void {
     ptr(Surface, data).closed = true;
 }
+fn remapDone(data: ?*anyopaque, cb: ?*c.wl_callback, _: u32) callconv(.c) void {
+    const self = ptr(Surface, data);
+    c.wl_callback_destroy(cb);
+    self.remap_barrier = null;
+    if (self.show_after_barrier) {
+        self.show_after_barrier = false;
+        self.show();
+    }
+}
+const remap_listener: c.wl_callback_listener = .{ .done = remapDone };
 const layer_listener: c.zwlr_layer_surface_v1_listener = .{ .configure = configure, .closed = closed };
 fn preferred(data: ?*anyopaque, _: ?*c.wp_fractional_scale_v1, factor: u32) callconv(.c) void {
     const self = ptr(Surface, data);

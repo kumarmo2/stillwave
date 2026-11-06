@@ -9,6 +9,12 @@
       "const": 1,
       "default": 1
     },
+    "backend": {
+      "type": "string",
+      "enum": ["mpv", "ffmpeg"],
+      "default": "mpv",
+      "description": "FFmpeg is opt-in and muted-only; unsupported pixel formats/HDR fail explicitly."
+    },
     "media": {
       "type": [
         "string",

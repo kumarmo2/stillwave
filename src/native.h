@@ -17,6 +17,12 @@
 #include <stdlib.h>
 #include <string.h>
 #include <stdio.h>
+#include <time.h>
 #include <sys/stat.h>
 #include <sys/eventfd.h>
 #include <sys/signalfd.h>
+#include <sys/socket.h>
+#include <sys/un.h>
+#include <sys/file.h>
+#include "ffmpeg_decoder.h"
+#include "render/yuv.h"

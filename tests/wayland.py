@@ -108,7 +108,7 @@ def scenario(version, use_xdg, args, expected_code=0):
 
         thread = threading.Thread(target=serve, daemon=True)
         thread.start()
-        result = subprocess.run([str(binary), *args], env=os.environ | {"WAYLAND_DISPLAY": path},
+        result = subprocess.run([str(binary), *args], env=os.environ | {"WAYLAND_DISPLAY": path, "XDG_RUNTIME_DIR": tmp},
                                 capture_output=True, text=True, timeout=10)
         thread.join(10)
         server.close()

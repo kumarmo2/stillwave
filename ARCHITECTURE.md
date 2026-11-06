@@ -62,13 +62,17 @@ wallpaper debugging session.
 - Foreground CLI with local video playback, looping, muting, fill/fit scaling,
   optional hardware decoding, and a start-paused setting.
 - Versioned JSON settings, XDG configuration discovery, and explicit CLI overrides.
+- `mpv` default and opt-in `ffmpeg` playback backends in the same executable.
+  FFmpeg uses native YUV GPU conversion and muted-only resource-releasing playback.
 - Playback on all connected outputs by default, or a selected subset by name.
 - A background surface and independent player per selected output.
 - Compositor-provided surface sizing, integer/fractional scaling, and output
   removal/reconnection handling.
 - Event-driven rendering, hidden-frame consumption, and signal-driven shutdown.
+- Session-scoped single-instance ownership and same-binary `hide`, `show`, `quit`
+  commands over a private Unix socket. Playback stays foreground-only.
 
-No GUI, runtime control socket, per-output video configuration, X11 backend, or
+No GUI, per-output video configuration, X11 backend, or
 Wallpaper Engine scene/web renderer exists yet. Multi-output/hotplug code is
 implemented, but broad live coverage of mixed-display setups remains outstanding.
 
@@ -94,9 +98,16 @@ Links point to hand-written source, not generated bindings.
 | [src/config.zig](src/config.zig) | Typed settings, JSON parsing, merging, validation | `Config`, `Overrides`, `load`, `validateRunnable` |
 | [src/xdg.zig](src/xdg.zig) | Configuration location and relative-path rules | `configPath`, `discover`, `resolve` |
 | [src/app.zig](src/app.zig) | Playback lifecycle, per-output ownership, event loop | `run`, `State`, `listOutputs` |
+| [src/control.zig](src/control.zig) | Session lock, private local socket, command client/server | `Server`, `send` |
+| [src/startup.zig](src/startup.zig) | Opt-in monotonic startup/resume timings | `Profile` |
+| [src/playback.zig](src/playback.zig) | Pure worker-owned load/stop/idle state machine | `Playback` |
 | [src/platform/wayland.zig](src/platform/wayland.zig) | Capability/output discovery and wallpaper surfaces | `Client`, `Output`, `Surface` |
 | [src/render/egl.zig](src/render/egl.zig) | OpenGL context and native presentation windows | `Context`, `Window` |
 | [src/render/pacing.zig](src/render/pacing.zig) | Pure draw/skip/wait decisions | `Pacing` |
+| [src/backend.zig](src/backend.zig) | Stable-address backend-neutral adapter | `Player` |
+| [src/ffmpeg.zig](src/ffmpeg.zig) | Render-owner FFmpeg adapter, frame/GL ownership | `Player` |
+| [src/ffmpeg_decoder.c](src/ffmpeg_decoder.c) | Worker-owned demux/decode/CUDA lifetime and CPU-frame mailbox | `SWDecoder` |
+| [src/render/yuv.c](src/render/yuv.c) | Native-plane uploads and GPU color conversion | `sw_yuv_upload`, `sw_yuv_draw` |
 | [src/player.zig](src/player.zig) | libmpv setup, events, rendering, notifications | `Player`, `pollUpdate`, `draw`, `skip`, `events` |
 | [src/support.zig](src/support.zig) | Diagnostics and small libc-backed I/O helpers | `Diagnostic`, `readFile`, `json` |
 | [src/native.h](src/native.h), [src/c.zig](src/c.zig) | Native API declaration boundary | Generated `native` module import |
@@ -145,10 +156,39 @@ Some commands avoid most of this:
 | `--help`, `--version`, `config defaults` | No | No |
 | `config show`, `config validate` | Yes, unless disabled | No |
 | `list-outputs` | No | Yes; no playback surfaces |
-| `run` | Yes, unless disabled | Yes, after media-path validation |
+| `run` | Yes, unless disabled | Yes, after media-path validation and session locking |
+| `hide`, `show`, `quit` | No | No direct connection; commands go to the running owner |
 
 `config validate` checks settings, not file existence or codec support. A valid
 JSON template may still have `media: null` and therefore not be runnable.
+
+### Persistent hide/show lifecycle
+
+`control.Server` holds a session-scoped advisory lock for the lifetime of `run`.
+The owner polls its private Unix datagram socket alongside Wayland and eventfd;
+commands mutate presentation state on the render-owner thread. Controllers are
+short-lived invocations of the same executable and do not load user config.
+
+Hiding detaches the Wayland buffer and commits, cancels frame pacing, and asks
+mpv's event worker to mute and stop/unload media. A Wayland sync barrier drains stale configure
+events before remapping. Showing reapplies layer-shell state and commits without
+a buffer, then waits for a fresh configure. The event worker reloads media in the
+retained player. `src/playback.zig` tracks loading/ready/stopping/unloaded states
+separately from the desired visibility epoch. The worker waits for `idle-active`
+and drains old terminal events before reloading; canceling a load does not wait
+for PLAYBACK_RESTART. START_FILE/PLAYBACK_RESTART track the next load's readiness.
+Pending frames are consumed with SKIP_RENDERING until presentation is allowed.
+Neither hide nor show destroys the expensive EGL or mpv rendering contexts.
+Playback commands run on the mpv worker rather than blocking the render thread;
+visibility epochs keep rapid requests from presenting an obsolete reload.
+
+The opt-in FFmpeg backend has a separate worker-owned cancellation/generation
+protocol instead of mpv events: hide deletes video textures on the GL owner and
+requests decoder shutdown; old-session cleanup completes before the next open.
+CPU-only mailbox references cannot retain CUDA surfaces. Idle per-output shader /
+EGL resources are reused, while output retirement waits without joining an active
+worker on the control thread. See [FFmpeg integration](FFMPEG_BACKEND.md) for formats,
+EOF grace, ownership, build options, and validation boundaries.
 
 ## 5. Configuration is data, not live resources
 
@@ -466,6 +506,11 @@ carefully isolated workaround would require separate investigation and tests.
 
 ### Phase 2: a controllable CLI application
 
+Basic single-instance ownership, `hide`/`show`/`quit`, private Unix datagram IPC,
+and render-thread presentation mutations are now implemented. The protocol is a
+small fixed command/reply exchange, not JSON. The remaining ideas below concern
+richer controls and a future versioned API.
+
 - Introduce application commands/events for pause, resume, stop, video replacement,
   output queries, and inspection of current status.
 - Consider a local Unix socket under `$XDG_RUNTIME_DIR`, with a versioned JSON
@@ -501,7 +546,8 @@ flowchart TD
     CORE --> BACKEND[Native presentation backend]
 ```
 
-This is a proposed topology, not a socket or GUI that exists in the repository.
+The richer JSON protocol and GUI above are proposed; the repository currently
+has a basic same-binary command client and private Unix datagram control socket.
 
 ### Phase 4: richer media and platform support
 
