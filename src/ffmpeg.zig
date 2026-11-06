@@ -101,6 +101,9 @@ pub const Player = struct {
         self.needs_draw = false;
         self.first_frame_seen = false;
     }
+    pub fn setPaused(self: *Player, paused: bool) void {
+        if (enabled) c.sw_decoder_paused(self.decoder, @intFromBool(paused));
+    }
     pub fn restart(self: *Player) void {
         if (!enabled) return;
         self.requested = true;

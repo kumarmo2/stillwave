@@ -2,7 +2,8 @@ const std = @import("std");
 const c = @import("c.zig").api;
 const support = @import("support.zig");
 
-pub const Command = enum(u8) { hide = 'h', show = 's', quit = 'q' };
+pub const Command = enum(u8) { hide = 'h', show = 's', quit = 'q', set_video = 'v' };
+pub const max_path = 4096;
 
 const Address = struct {
     value: c.struct_sockaddr_un = std.mem.zeroes(c.struct_sockaddr_un),
@@ -71,6 +72,8 @@ pub const Request = struct {
     command: ?Command,
     peer: Address,
     peer_len: c.socklen_t,
+    path: [max_path]u8 = undefined,
+    path_len: usize = 0,
 };
 
 /// One datagram per command, one reply after the owner applies it. The private
@@ -114,8 +117,8 @@ pub const Server = struct {
 
     pub fn receive(self: *Server) !?Request {
         var request: Request = .{ .command = null, .peer = .{}, .peer_len = @sizeOf(c.struct_sockaddr_un) };
-        var bytes: [2]u8 = undefined;
-        const n = c.recvfrom(self.fd, &bytes, bytes.len, c.MSG_DONTWAIT, .{ .__sockaddr_un__ = &request.peer.value }, &request.peer_len);
+        var bytes: [max_path + 1]u8 = undefined;
+        const n = c.recvfrom(self.fd, &bytes, bytes.len, c.MSG_DONTWAIT | c.MSG_TRUNC, .{ .__sockaddr_un__ = &request.peer.value }, &request.peer_len);
         if (n < 0) {
             if (c.__errno_location().* == c.EAGAIN or c.__errno_location().* == c.EINTR) return null;
             return error.ControlReceiveFailed;
@@ -126,7 +129,23 @@ pub const Server = struct {
             'q' => .quit,
             else => null,
         };
+        if (n > 1 and n <= bytes.len and bytes[0] == 'v') {
+            const path = bytes[1..@intCast(n)];
+            if (std.fs.path.isAbsolute(path) and std.mem.indexOfScalar(u8, path, 0) == null) {
+                request.command = .set_video;
+                request.path_len = path.len;
+                @memcpy(request.path[0..path.len], path);
+            }
+        }
         return request;
+    }
+
+    pub fn reject(self: *Server, request: Request, message: []const u8) void {
+        var bytes: [512]u8 = undefined;
+        bytes[0] = 'E';
+        const len = @min(message.len, bytes.len - 1);
+        @memcpy(bytes[1..][0..len], message[0..len]);
+        _ = c.sendto(self.fd, &bytes, len + 1, c.MSG_DONTWAIT | c.MSG_NOSIGNAL, request.peer.ptr(), request.peer_len);
     }
 
     pub fn reply(self: *Server, request: Request, success: bool) void {
@@ -136,6 +155,16 @@ pub const Server = struct {
 };
 
 pub fn send(a: std.mem.Allocator, command: Command) !void {
+    return sendRequest(a, command, null, null);
+}
+
+pub fn setVideo(a: std.mem.Allocator, path: []const u8, d: *support.Diagnostic) !void {
+    if (path.len == 0 or path.len > max_path or std.mem.indexOfScalar(u8, path, 0) != null)
+        return d.fail(a, "invalid or oversized video path", .{});
+    return sendRequest(a, .set_video, path, d);
+}
+
+fn sendRequest(a: std.mem.Allocator, command: Command, path: ?[]const u8, d: ?*support.Diagnostic) !void {
     var paths = try Paths.init(a, false);
     defer paths.deinit();
     const fd = c.socket(c.AF_UNIX, c.SOCK_DGRAM | c.SOCK_CLOEXEC | c.SOCK_NONBLOCK, 0);
@@ -147,11 +176,20 @@ pub fn send(a: std.mem.Allocator, command: Command) !void {
     if (c.bind(fd, .{ .__sockaddr_un__ = &local }, @sizeOf(c.sa_family_t)) != 0) return error.ControlSocketFailed;
     const address = try Address.init(paths.socket);
     if (c.connect(fd, address.ptr(), @sizeOf(c.struct_sockaddr_un)) != 0) return error.NoRunningInstance;
-    const byte = [_]u8{@backingInt(command)};
-    if (c.send(fd, &byte, 1, c.MSG_NOSIGNAL) != 1) return error.ControlSendFailed;
+    var bytes: [max_path + 1]u8 = undefined;
+    bytes[0] = @backingInt(command);
+    const len = if (path) |p| p.len + 1 else 1;
+    if (path) |p| @memcpy(bytes[1..len], p);
+    if (c.send(fd, &bytes, len, c.MSG_NOSIGNAL) != len) return error.ControlSendFailed;
     var pollfd: c.struct_pollfd = .{ .fd = fd, .events = c.POLLIN, .revents = 0 };
     // Commands acknowledge application, not actual compositor presentation.
-    if (c.poll(&pollfd, 1, 5000) <= 0) return error.ControlReplyTimeout;
-    var reply: [2]u8 = undefined;
-    if (c.recv(fd, &reply, reply.len, 0) != 1 or reply[0] != 'K') return error.ControlCommandFailed;
+    if (c.poll(&pollfd, 1, if (path != null) 60000 else 5000) <= 0) return error.ControlReplyTimeout;
+    var reply: [512]u8 = undefined;
+    const n = c.recv(fd, &reply, reply.len, 0);
+    if (n != 1 or reply[0] != 'K') {
+        if (d) |diagnostic| if (n > 1 and reply[0] == 'E') {
+            diagnostic.message = try a.dupe(u8, reply[1..@intCast(n)]);
+        };
+        return error.ControlCommandFailed;
+    }
 }

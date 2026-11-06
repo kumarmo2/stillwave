@@ -6,6 +6,7 @@ const egl = @import("render/egl.zig");
 const player = @import("backend.zig");
 const startup = @import("startup.zig");
 const control = @import("control.zig");
+const replacement = @import("replacement.zig");
 const c = @import("c.zig").api;
 
 var interrupted = std.atomic.Value(bool).init(false);
@@ -18,7 +19,7 @@ fn onSignal(_: c_int) callconv(.c) void {
 const State = struct {
     surface: wl.Surface = undefined,
     window: ?egl.Window = null,
-    video: ?player.Player = null,
+    video: ?*player.Player = null,
     audible: bool = false,
     last_scale: i32 = 1,
     configure_start: u64 = 0,
@@ -29,7 +30,10 @@ const State = struct {
     fn deinit(self: *State, context: *egl.Context) void {
         if (self.window) |*window| {
             context.makeCurrent(window.surface) catch {};
-            if (self.video) |*video| video.deinit();
+            if (self.video) |video| {
+                video.deinit();
+                std.heap.c_allocator.destroy(video);
+            }
             window.deinit();
         }
         self.surface.deinit();
@@ -76,7 +80,10 @@ pub fn listOutputs(a: std.mem.Allocator, as_json: bool) !void {
 
 /// Foreground application lifecycle shared independently of argv/config loading.
 /// A single running instance per process; call on its render-owner thread.
-pub fn run(a: std.mem.Allocator, cfg: config.Config, d: *support.Diagnostic, profile: *const startup.Profile) !void {
+pub fn run(a: std.mem.Allocator, initial: config.Config, config_path: ?[]const u8, d: *support.Diagnostic, profile: *const startup.Profile) !void {
+    var cfg = initial;
+    var current_media: ?[]const u8 = null;
+    defer if (current_media) |media| std.heap.c_allocator.free(media);
     const validation_start = profile.begin();
     try config.validateRunnable(a, cfg, d);
     if (cfg.backend == .ffmpeg and !@import("build_options").ffmpeg)
@@ -132,6 +139,8 @@ pub fn run(a: std.mem.Allocator, cfg: config.Config, d: *support.Diagnostic, pro
         states.deinit(runtime);
         _ = c.wl_display_flush(client.display);
     }
+    var transaction: ?*replacement.Transaction = null;
+    defer if (transaction) |t| t.destroy(&context);
     if (cfg.log_level == .info or cfg.log_level == .debug)
         std.debug.print("Playing on {s}; Ctrl-C to stop. Background layer, no input/focus.\n", .{if (cfg.outputs.len == 0) "all outputs (including hotplug)" else "selected outputs"});
     while (!interrupted.load(.acquire)) {
@@ -143,7 +152,26 @@ pub fn run(a: std.mem.Allocator, cfg: config.Config, d: *support.Diagnostic, pro
                 commands.reply(request, false);
                 continue;
             };
+            if ((command == .hide or command == .show) and transaction != null and !transaction.?.cleaning) {
+                commands.reject(request, "video replacement in progress; retry visibility command");
+                continue;
+            }
             switch (command) {
+                .set_video => {
+                    if (transaction != null) {
+                        commands.reject(request, "video replacement or resource cleanup in progress; retry");
+                        continue;
+                    }
+                    const path = config_path orelse {
+                        commands.reject(request, "set-video requires persistence; runner was started with --no-config");
+                        continue;
+                    };
+                    transaction = replacement.Transaction.create(request, path, cfg, &client, &context, wake, profile) catch |err| {
+                        commands.reject(request, @errorName(err));
+                        continue;
+                    };
+                    continue; // Final reply follows validation and atomic persistence.
+                },
                 .quit => {
                     commands.reply(request, true);
                     return;
@@ -152,7 +180,7 @@ pub fn run(a: std.mem.Allocator, cfg: config.Config, d: *support.Diagnostic, pro
                     visible = false;
                     for (states.items) |s| {
                         if (!s.surface.output.active or s.surface.closed) continue;
-                        if (s.video) |*video| {
+                        if (s.video) |video| {
                             try context.makeCurrent(s.window.?.surface);
                             video.hide();
                             try video.setAudible(false);
@@ -170,12 +198,69 @@ pub fn run(a: std.mem.Allocator, cfg: config.Config, d: *support.Diagnostic, pro
                         s.resume_pending = true;
                         s.resume_start = show_start;
                         s.configure_start = show_start;
-                        if (s.video) |*video| video.restart();
+                        if (s.video) |video| video.restart();
                         s.surface.show();
                     }
                 },
             }
             commands.reply(request, true);
+        }
+        if (transaction) |t| {
+            if (t.cleaning) {
+                if (t.reap(&context)) {
+                    t.destroy(&context);
+                    transaction = null;
+                }
+            } else validation: {
+                const ready_candidate = t.service(cfg, &client, &context, wake, profile) catch |err| {
+                    commands.reject(t.request, @errorName(err));
+                    t.beginCleanup(&context);
+                    break :validation;
+                };
+                if (ready_candidate) {
+                    // Allocate before saving: no fallible bookkeeping after commit.
+                    const media = runtime.dupe(u8, t.media) catch {
+                        commands.reject(t.request, "out of memory");
+                        t.beginCleanup(&context);
+                        break :validation;
+                    };
+                    t.snapshot.save(t.media) catch |err| {
+                        runtime.free(media);
+                        commands.reject(t.request, @errorName(err));
+                        t.beginCleanup(&context);
+                        break :validation;
+                    };
+                    for (t.candidates.items) |candidate| {
+                        for (states.items) |s| {
+                            if (s.retiring or !s.surface.output.active or s.video == null or s.surface.output.id != candidate.output_id) continue;
+                            // Exchange heap pointers, never callback-bearing
+                            // structs. Each mpv player retains its own GL context.
+                            const previous = s.video;
+                            s.video = candidate.video;
+                            candidate.video = previous;
+                            candidate.hidden = !visible; // old player already unloaded
+                            s.video.?.setPaused(cfg.paused);
+                            if (!visible) {
+                                context.makeCurrent(s.window.?.surface) catch {};
+                                s.video.?.hide();
+                            } else {
+                                s.video.?.forceDraw();
+                                s.surface.dirty = true;
+                                s.resume_pending = true;
+                                s.resume_start = profile.begin();
+                            }
+                            // Candidates begin muted. Reassign audio next loop.
+                            s.audible = false;
+                            break;
+                        }
+                    }
+                    cfg.media = media;
+                    if (current_media) |previous| runtime.free(previous);
+                    current_media = media;
+                    commands.reply(t.request, true);
+                    t.beginCleanup(&context);
+                }
+            }
         }
         // Remove surfaces/players before releasing the corresponding wl_output.
         var i: usize = 0;
@@ -188,13 +273,13 @@ pub fn run(a: std.mem.Allocator, cfg: config.Config, d: *support.Diagnostic, pro
             }
             if (!s.retiring) {
                 s.retiring = true;
-                if (s.video) |*video| {
+                if (s.video) |video| {
                     try context.makeCurrent(s.window.?.surface);
                     video.hide();
                 }
                 try s.surface.hide();
             }
-            if (s.video) |*video| {
+            if (s.video) |video| {
                 if (!video.canDeinit()) {
                     i += 1;
                     continue;
@@ -238,13 +323,20 @@ pub fn run(a: std.mem.Allocator, cfg: config.Config, d: *support.Diagnostic, pro
             if (surface.invalid) return error.InvalidCompositorSurfaceConfiguration;
             // Retained players must consume pending mpv frames even while
             // unmapped or waiting for the new configure/reload to finish.
-            if (s.video) |*video| {
+            if (s.video) |video| {
                 if (video.failed()) return error.VideoPlaybackFailed;
                 try context.makeCurrent(s.window.?.surface);
                 video.pollUpdate();
                 if (video.failed()) return error.VideoPlaybackFailed;
                 if (!visible or !surface.configured or !video.ready()) {
-                    if (video.needsDraw()) try video.skip();
+                    if (video.needsDraw()) {
+                        if (visible) {
+                            // Prime a paused load in the back buffer before
+                            // readiness/configure; never swap or map it yet.
+                            try video.draw(s.window.?.width, s.window.?.height);
+                            video.reportSwap();
+                        } else try video.skip();
+                    }
                     // A current load may reach EOF before rendering readiness.
                     // Count it as finished rather than waiting indefinitely.
                     if (!visible or !video.finished()) all_finished = false;
@@ -272,30 +364,33 @@ pub fn run(a: std.mem.Allocator, cfg: config.Config, d: *support.Diagnostic, pro
                 const label = surface.output.name orelse "unnamed";
                 profile.mark(label, "surface configure observed (includes event-loop waits)", s.configure_start);
                 const window_start = profile.begin();
-                // Initialize in place: native callbacks retain &s.video, never a copy.
+                // Heap-stable player: native callback targets are never copied.
                 s.window = .{ .context = &context, .width = size.w, .height = size.h };
                 egl.Window.init(&s.window.?, &context, surface.wl.?, size.w, size.h) catch |err| {
                     s.window = null;
                     return err;
                 };
                 profile.mark(label, "EGL window initialized and current", window_start);
-                s.video = .{ .wake_fd = wake, .label = label, .log_level = cfg.log_level };
-                player.Player.init(&s.video.?, cfg, client.display, wake, label, profile) catch |err| {
-                    s.video = null;
+                const p = try runtime.create(player.Player);
+                player.Player.init(p, cfg, client.display, wake, label, profile, &context) catch |err| {
+                    runtime.destroy(p);
                     return err;
                 };
+                s.video = p;
                 if (cfg.log_level == .info or cfg.log_level == .debug)
                     std.debug.print("[{s}] configured {d}x{d}, buffer {d}x{d} (scale {d}/120)\n", .{ surface.output.name orelse "unnamed", surface.width, surface.height, size.w, size.h, surface.scale_120 });
             }
             const window = &s.window.?;
-            const video = &s.video.?;
+            const video = s.video.?;
             if (video.failed()) return error.VideoPlaybackFailed;
             const finished = video.finished();
             if (!finished) {
                 any_playing = true;
                 all_finished = false;
             }
-            const audible = !cfg.mute and !audio_assigned and !finished;
+            // Retire/join old audio workers before unmuting replacements.
+            const audio_handoff_ready = transaction == null or !transaction.?.cleaning;
+            const audible = audio_handoff_ready and !cfg.mute and !audio_assigned and !finished;
             if (audible) audio_assigned = true;
             if (s.audible != audible) {
                 try video.setAudible(audible);
@@ -349,7 +444,7 @@ pub fn run(a: std.mem.Allocator, cfg: config.Config, d: *support.Diagnostic, pro
                 if (s.retiring or s.video == null or !s.video.?.finished()) all_finished = false;
             }
         }
-        if (visible and all_finished and !any_playing) return;
+        if (transaction == null and visible and all_finished and !any_playing) return;
         // prepare_read pairs exactly once with read_events or cancel_read.
         // EGL may have queued events internally; process them before polling.
         if (c.wl_display_prepare_read(client.display) != 0) continue;
@@ -369,8 +464,10 @@ pub fn run(a: std.mem.Allocator, cfg: config.Config, d: *support.Diagnostic, pro
             c.wl_display_cancel_read(client.display);
             break;
         }
-        var timeout: c_int = -1;
-        for (states.items) |s| if (s.video) |*video| {
+        // Bounded transaction polling covers decode deadlines and cleanup even
+        // when a backend supplies no wakeup (e.g. a failed/paused candidate).
+        var timeout: c_int = if (transaction != null) 50 else -1;
+        for (states.items) |s| if (s.video) |video| {
             const deadline = video.pollTimeout();
             if (deadline >= 0 and (timeout < 0 or deadline < timeout)) timeout = deadline;
         };

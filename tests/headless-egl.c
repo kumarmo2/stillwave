@@ -7,6 +7,7 @@
 #include <wayland-client.h>
 #include <wayland-egl.h>
 #include <mpv/render.h>
+#include <mpv/render_gl.h>
 #include <dlfcn.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -80,7 +81,8 @@ EGLBoolean eglSwapBuffers(EGLDisplay d, EGLSurface s) {
         void (*read_pixel)(GLint, GLint, GLsizei, GLsizei, GLenum, GLenum, void *) = symbol("glReadPixels");
         unsigned char pixel[4];
         read_pixel(window->w / 2, window->h / 2, 1, 1, GL_RGBA, GL_UNSIGNED_BYTE, pixel);
-        fprintf(stderr, "[test] pixel=%u,%u,%u,%u\n", pixel[0], pixel[1], pixel[2], pixel[3]);
+        fprintf(stderr, "[test] pixel=%u,%u,%u,%u surface=%u\n", pixel[0], pixel[1], pixel[2], pixel[3],
+                wl_proxy_get_id((struct wl_proxy *)window->surface));
         if (getenv("PROBE_TEST_READBACK_GRID")) {
             const char *labels[] = {"TL", "TR", "BL", "BR"};
             for (int i = 0; i < 4; i++) {
@@ -150,6 +152,33 @@ mpv_event *mpv_wait_event(mpv_handle *handle, double timeout) {
         return &none;
     }
     return event;
+}
+int mpv_render_context_render(mpv_render_context *context, mpv_render_param *params) {
+    int (*real)(mpv_render_context *, mpv_render_param *) = symbol("mpv_render_context_render");
+    int result = real(context, params);
+    if (getenv("PROBE_TEST_RENDER_READBACK")) {
+        int skipped = 0, w = 0, h = 0;
+        for (int i = 0; params[i].type; i++) {
+            if (params[i].type == MPV_RENDER_PARAM_SKIP_RENDERING) skipped = *(int *)params[i].data;
+            if (params[i].type == MPV_RENDER_PARAM_OPENGL_FBO) {
+                mpv_opengl_fbo *f = params[i].data;
+                w = f->w; h = f->h;
+            }
+        }
+        if (!skipped && w && h) {
+            unsigned char pixel[4];
+            glReadPixels(w / 2, h / 2, 1, 1, GL_RGBA, GL_UNSIGNED_BYTE, pixel);
+            GLint draw_buffer, read_buffer, active_texture, viewport[4];
+            glGetIntegerv(GL_DRAW_BUFFER, &draw_buffer);
+            glGetIntegerv(GL_READ_BUFFER, &read_buffer);
+            glGetIntegerv(GL_ACTIVE_TEXTURE, &active_texture);
+            glGetIntegerv(GL_VIEWPORT, viewport);
+            fprintf(stderr, "[test] render=%p surface=%p size=%dx%d rgb=%u,%u,%u error=%x draw=%x read=%x active=%x viewport=%d,%d,%d,%d\n",
+                    (void *)context, (void *)eglGetCurrentSurface(EGL_DRAW), w, h, pixel[0], pixel[1], pixel[2],
+                    glGetError(), draw_buffer, read_buffer, active_texture, viewport[0], viewport[1], viewport[2], viewport[3]);
+        }
+    }
+    return result;
 }
 int mpv_render_context_create(mpv_render_context **out, mpv_handle *handle, mpv_render_param *params) {
     int (*real)(mpv_render_context **, mpv_handle *, mpv_render_param *) = symbol("mpv_render_context_create");

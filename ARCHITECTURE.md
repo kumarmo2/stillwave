@@ -140,7 +140,7 @@ For `run`:
 3. `Client.init` connects to Wayland, discovers interfaces/outputs, and collects
    initial output metadata. Required capabilities and explicit output names are
    checked before starting playback resources.
-4. The application creates a shared EGL context and a `State` for each selected
+4. The application creates EGL display/configuration resources and a `State` for each selected
    output. Initially a state has a Wayland surface but no EGL window/player.
 5. The compositor sends a surface configuration. The client acknowledges it and
    records its dimensions; buffers are not attached before this handshake.
@@ -245,8 +245,12 @@ flowchart TD
 
 This is a lifetime overview, not a strict ownership tree: a `State` holds a
 reference to its discovered `Output`; the `Client` owns that output object.
-Each EGL window uses the shared EGL context. Each `Player` has its **own** mpv
-core and mpv render context, using the application-owned OpenGL context.
+Each mpv `Player` has its **own** core, mpv render context and isolated EGL/OpenGL
+context. The adapter makes that context current on the chosen window before
+render API calls. Isolation prevents interference when other cores initialize or
+retire during staged replacement (paused multi-output pixel tests exercise this).
+FFmpeg players use the shared application context. All GL work stays on the owner
+thread; contexts, like renderers, survive ordinary hide/show.
 
 Consequences:
 
@@ -478,8 +482,8 @@ carefully isolated workaround would require separate investigation and tests.
 
 ### POC limitations that affect design
 
-- No runtime pause/resume, video replacement, config reload, or single-instance
-  coordination. `paused` currently controls startup only.
+- No runtime pause/resume command or general config reload. `paused` controls
+  startup/replacement/restart; `set-video` provides transactional media replacement.
 - One decoder per output trades efficiency and synchronization for simplicity.
 - Hardware decoding is opportunistic, with software fallback; not a zero-copy
   guarantee. Diagnostics distinguish requested settings from the actual decoder.
@@ -506,12 +510,19 @@ carefully isolated workaround would require separate investigation and tests.
 
 ### Phase 2: a controllable CLI application
 
-Basic single-instance ownership, `hide`/`show`/`quit`, private Unix datagram IPC,
-and render-thread presentation mutations are now implemented. The protocol is a
-small fixed command/reply exchange, not JSON. The remaining ideas below concern
-richer controls and a future versioned API.
+Single-instance ownership, `hide`/`show`/`quit`, `set-video`, private Unix datagram
+IPC, and render-thread presentation mutations are implemented. The protocol uses
+fixed command bytes, a bounded absolute-path payload for replacement, and replies;
+it is not JSON. `src/replacement.zig` stages heap-stable muted players on unmapped
+EGL windows and holds the first frame until commit. Existing players survive
+candidate failures; successful commits exchange player pointers on the owner thread.
+`src/persistence.zig` updates only the media JSON value with atomic file replacement,
+preserving unrelated bytes and rejecting detected concurrent changes. See the
+README for deadlines, hidden validation, persistence limits and temporary GPU cost.
+`tests/replacement.py` validates both backends without touching the desktop.
+The remaining ideas concern richer controls and a future versioned API.
 
-- Introduce application commands/events for pause, resume, stop, video replacement,
+- Introduce application commands/events for pause, resume, stop,
   output queries, and inspection of current status.
 - Consider a local Unix socket under `$XDG_RUNTIME_DIR`, with a versioned JSON
   protocol and appropriate permissions. No network listener is needed.

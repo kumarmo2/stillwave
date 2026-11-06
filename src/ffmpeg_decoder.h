@@ -19,6 +19,7 @@ typedef struct {
 SWDecoder *sw_decoder_create(const char *path, int loop, int paused, int hw_auto,
                              int wake_fd, const char *label, int profile);
 void sw_decoder_visibility(SWDecoder *d, int visible);
+void sw_decoder_paused(SWDecoder *d, int paused);
 void sw_decoder_status(SWDecoder *d, SWDecoderStatus *status);
 SWFrame *sw_decoder_take(SWDecoder *d);
 const SWImage *sw_frame_image(const SWFrame *frame);

@@ -38,6 +38,7 @@ zig build test
 python3 tests/cli.py
 python3 tests/wayland.py
 python3 tests/control.py  # real libmpv + offscreen Mesa; requires cc and ffmpeg
+python3 tests/replacement.py  # transactional set-video, both backends; no desktop
 python3 tests/ffmpeg.py   # integrated FFmpeg + native YUV shader tests; no CUDA/desktop
 python3 tests/install.py  # uses a temporary HOME, never your actual user bin
 ```
@@ -197,7 +198,7 @@ session. Inherited `WAYLAND_SOCKET` connections are not supported for `run` or
 control commands. Socket files are removed on normal exit and recovered after a
 crash; a small private directory and lock file remain intentionally.
 
-A successful command acknowledges the requested state, **not** completion of the
+A successful hide/show/quit command acknowledges the requested state, **not** completion of the
 asynchronous playback transition or compositor presentation. Clients wait up to
 five seconds for that acknowledgement. No screen-visibility guarantee is made.
 Media/decoder allocations can be released on hide, but renderer caches, EGL back
@@ -213,6 +214,50 @@ remapping, completed hidden unload, presentation inactivity, context retention,
 rapid toggles, interrupted loading, delayed terminal events, paused restarts,
 EOF behavior, duplicate rejection, and crash recovery. Actual compositor /
 NVIDIA remapping and perceived resume latency still require desktop validation.
+
+## Replace the video and save it
+
+```sh
+# Owner must use configuration (default XDG or an explicit --config file).
+./zig-out/bin/stillwave run /path/to/first.mp4
+# Another terminal, using the same locally built binary/session:
+./zig-out/bin/stillwave set-video /path/to/next.mp4
+# For a filename starting with '-': stillwave set-video -- -clip.mp4
+```
+
+`set-video` replaces media on every selected output and explicitly persists only
+`media` in **the owner's startup config file**. Relative video paths resolve in
+the command caller's working directory and are saved as absolute paths. Other
+settings and unrelated config bytes are preserved; CLI overrides are not saved.
+A missing config and its parent directories are created. A runner started with
+`--no-config` rejects this command. Config symlinks/nonregular files are rejected.
+
+The owner stages muted players on unmapped surfaces, decodes and draws a first
+frame offscreen for each selected output, then atomically saves the config and
+switches players. Candidates are held paused until commit so short videos do not
+finish during validation. The original players remain intact on load/save failure:
+no rollback reload is needed. This temporarily requires extra decoder/GPU resources;
+there is no crossfade or frame-exact multi-output transition. The existing backend,
+scaling, looping, mute and paused settings remain in effect.
+
+Hidden replacements remain hidden, validate offscreen and unload decoding resources;
+next show starts the committed video from the beginning. Outputs not yet initialized
+use the committed path when initialized. Validation is not a promise that the file
+will remain readable or decode forever after commit or a later reload.
+
+One transaction runs at a time; concurrent replacements and hide/show during
+validation return a busy error (retry). Quit remains available. Output connection
+changes during validation abort the transaction; no selected outputs is an error.
+Validation has a 30-second deadline; the client waits up to 60 seconds for the final
+result. Success means first-frame validation and saving completed, **not** that the
+compositor presented the new video. Decoder resource cleanup may continue afterward,
+during which another replacement can still return busy.
+
+Config contents and permissions are checked again before saving; detected edits
+abort without changing playback. Atomic rename prevents partial JSON, but does not
+serialize against uncooperative editors in the narrow check-to-rename interval.
+Avoid editing the same config concurrently with `set-video`. File data is fsynced;
+crash/power-loss atomicity across playback and filesystem state is not promised.
 
 ## Startup profiling
 
@@ -363,8 +408,10 @@ There is one independent decoder/player per output. Videos repeat separately
 on each display (not spanned over the layout); **frame-exact synchronization
 across displays is not promised**. New/reconnected displays start at the beginning.
 This keeps the POC simple but increases GPU/memory use with additional outputs.
-Player render contexts share the render-owner EGL context and are made current
-on the appropriate window before use; mpv control operations run on event
+Each mpv player owns an isolated EGL/OpenGL context, made current on the
+appropriate window before use. This prevents GL state/resource lifecycle
+interference during staged replacement; the context is retained across hide/show.
+FFmpeg uses the application's shared context. mpv control operations run on event
 threads or use explicitly render-thread-safe async APIs. Wayland and GL objects
 are manipulated only on the main/render thread.
 
@@ -378,7 +425,7 @@ pause**: decoding can continue behind windows, and generic Wayland doesn't
 reliably expose such state. Display power management/suspend behavior is not yet
 validated. No universal zero-copy/hardware-decoding or seamless-loop guarantee.
 
-No GUI, control socket, config hot reload, per-output videos/settings, Workshop
+No GUI, config hot reload, per-output videos/settings, Workshop
 downloads, Wallpaper Engine scene/web support, or X11 backend yet. Those can be
 added on top of the shared settings/application modules. Before distributing
 binaries, review your linked libmpv/FFmpeg build's licensing. Vendored protocol

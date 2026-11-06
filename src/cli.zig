@@ -1,7 +1,7 @@
 const std = @import("std");
 const config = @import("config.zig");
 const support = @import("support.zig");
-pub const Command = enum { help, version, run, list_outputs, defaults, show, validate, hide, reveal, quit };
+pub const Command = enum { help, version, run, list_outputs, defaults, show, validate, hide, reveal, quit, set_video };
 pub const Options = struct {
     command: Command = .help,
     source: config.Source = .{},
@@ -15,6 +15,7 @@ pub const help =
     \\Usage:
     \\  stillwave run [OPTIONS] [VIDEO]
     \\  stillwave hide | show | quit
+    \\  stillwave set-video [--] VIDEO
     \\  stillwave list-outputs [--json]
     \\  stillwave config defaults
     \\  stillwave config show [OPTIONS] [VIDEO]
@@ -39,6 +40,7 @@ pub const help =
     \\Config: $XDG_CONFIG_HOME/stillwave/config.json
     \\        fallback: $HOME/.config/stillwave/config.json
     \\Precedence: defaults < JSON file < CLI overrides. No implicit config writes.
+    \\set-video explicitly saves media to the runner's config after validation.
     \\Runs in foreground; Ctrl-C or SIGTERM stops it. No shell/WM-specific IPC.
     \\hide/show/quit control the existing run in this Wayland session.
     \\hide unloads/unmaps; show starts from the beginning using retained contexts.
@@ -54,6 +56,14 @@ pub fn parse(a: std.mem.Allocator, args: []const []const u8, d: *support.Diagnos
     if (std.mem.eql(u8, cmd, "--version")) return .{ .command = .version };
     if (std.mem.eql(u8, cmd, "run")) {
         o.command = .run;
+    } else if (std.mem.eql(u8, cmd, "set-video")) {
+        if (args.len == 3 and (std.mem.eql(u8, args[2], "--help") or std.mem.eql(u8, args[2], "-h"))) return o;
+        const literal = args.len == 4 and std.mem.eql(u8, args[2], "--");
+        if ((!literal and args.len != 3) or (!literal and std.mem.startsWith(u8, args[2], "-")))
+            return d.fail(a, "set-video requires one VIDEO path (use -- for paths beginning with '-')", .{});
+        const path = args[if (literal) 3 else 2];
+        if (path.len == 0) return d.fail(a, "set-video requires a nonempty VIDEO path", .{});
+        return .{ .command = .set_video, .overrides = .{ .media = path } };
     } else if (std.mem.eql(u8, cmd, "hide") or std.mem.eql(u8, cmd, "show") or std.mem.eql(u8, cmd, "quit")) {
         if (args.len == 3 and (std.mem.eql(u8, args[2], "--help") or std.mem.eql(u8, args[2], "-h"))) return o;
         if (args.len != 2) return d.fail(a, "{s} takes no arguments", .{cmd});
@@ -150,6 +160,9 @@ test "CLI supports many outputs, false overrides, all, and literal paths" {
     try std.testing.expectEqualStrings("-clip.mp4", o.overrides.media.?);
     const all = try parse(a, &.{ "w", "run", "--all-outputs" }, &d);
     try std.testing.expect(all.overrides.outputs.?.len == 0);
+    const replacement = try parse(a, &.{ "w", "set-video", "--", "-clip.mp4" }, &d);
+    try std.testing.expectEqual(Command.set_video, replacement.command);
+    try std.testing.expectEqualStrings("-clip.mp4", replacement.overrides.media.?);
 }
 test "CLI rejects conflicting flags and stray arguments" {
     var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
@@ -159,6 +172,8 @@ test "CLI rejects conflicting flags and stray arguments" {
         &.{ "w", "run", "--mute", "--no-mute" },            &.{ "w", "run", "--config", "x", "--no-config" },
         &.{ "w", "run", "--output", "A", "--all-outputs" }, &.{ "w", "run", "a", "b" },
         &.{ "w", "run", "--hwdec", "bad" },                 &.{ "w", "run", "--unknown" },
+        &.{ "w", "set-video" },                             &.{ "w", "set-video", "" },
+        &.{ "w", "set-video", "a", "b" },                   &.{ "w", "set-video", "--config", "x" },
     }) |args| {
         var d: support.Diagnostic = .{};
         try std.testing.expectError(error.InvalidInput, parse(a, args, &d));

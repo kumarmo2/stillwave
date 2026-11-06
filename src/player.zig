@@ -8,6 +8,7 @@ const Playback = @import("playback.zig").Playback;
 const Worker = struct {
     playback: Playback = .{},
     muted: bool = true,
+    paused: ?bool = null,
     unload_start: ?u64 = null,
 };
 const AtomicBool = std.atomic.Value(bool);
@@ -45,11 +46,11 @@ pub const Player = struct {
     ready_epoch: std.atomic.Value(u64) = .init(std.math.maxInt(u64)),
     audible_requested: AtomicBool = .init(false),
     media: ?[:0]u8 = null,
-    start_paused: bool = false,
+    start_paused: AtomicBool = .init(false),
 
     /// Stable address required; EGL context must be current until deinit.
     pub fn init(self: *Player, cfg: config.Config, wl: *c.wl_display, wake_fd: c_int, label: []const u8, profile: *const startup.Profile) !void {
-        self.* = .{ .wake_fd = wake_fd, .label = label, .log_level = cfg.log_level, .profile = profile, .start_paused = cfg.paused };
+        self.* = .{ .wake_fd = wake_fd, .label = label, .log_level = cfg.log_level, .profile = profile, .start_paused = .init(cfg.paused) };
         errdefer self.deinit();
         const create_start = profile.begin();
         self.handle = c.mpv_create() orelse return error.MpvCreateFailed;
@@ -120,8 +121,13 @@ pub const Player = struct {
     }
     pub fn restart(self: *Player) void {
         _ = self.visibility_epoch.fetchAdd(1, .acq_rel);
+        self.first_frame_seen = false;
         self.needs_draw = false;
         self.finished.store(false, .release);
+        c.mpv_wakeup(self.handle);
+    }
+    pub fn setPaused(self: *Player, paused: bool) void {
+        self.start_paused.store(paused, .release);
         c.mpv_wakeup(self.handle);
     }
     pub fn ready(self: *Player) bool {
@@ -147,6 +153,11 @@ pub const Player = struct {
             }
         }
         const desired = self.visibility_epoch.load(.acquire);
+        const paused = self.start_paused.load(.acquire);
+        if (worker.paused == null or worker.paused.? != paused) {
+            try self.setFlag("pause", paused);
+            worker.paused = paused;
+        }
         const should_mute = desired % 2 == 1 or !self.ready() or !self.audible_requested.load(.acquire);
         if (should_mute != worker.muted) {
             try self.setFlag("mute", should_mute);
@@ -164,7 +175,7 @@ pub const Player = struct {
                 return true;
             },
             .load => {
-                try self.setFlag("pause", self.start_paused);
+                try self.setFlag("pause", paused);
                 self.finished.store(false, .release);
                 worker.playback.load(desired);
                 const args = [_][*c]const u8{ "loadfile", self.media.?.ptr, "replace", null };
@@ -184,7 +195,14 @@ pub const Player = struct {
                 std.debug.print("[{s}] render update #{d}: flags={d}\n", .{ self.label, self.update_count, flags });
             if ((flags & c.MPV_RENDER_UPDATE_FRAME) != 0) {
                 self.needs_draw = true;
-                if (!self.first_frame_seen) {
+                // FRAME also covers redraws of an empty/cleared renderer.
+                // Such a redraw is not readiness for a new paused video.
+                var info: c.mpv_render_frame_info = std.mem.zeroes(c.mpv_render_frame_info);
+                const param: c.mpv_render_param = .{ .type = c.MPV_RENDER_PARAM_NEXT_FRAME_INFO, .data = &info };
+                const actual = c.mpv_render_context_get_info(self.render, param) >= 0 and
+                    (info.flags & c.MPV_RENDER_FRAME_INFO_PRESENT) != 0 and
+                    (info.flags & c.MPV_RENDER_FRAME_INFO_REDRAW) == 0;
+                if (!self.first_frame_seen and actual) {
                     self.first_frame_seen = true;
                     if (self.profile) |profile| profile.mark(self.label, "first mpv FRAME update observed since load request", self.load_start);
                 }

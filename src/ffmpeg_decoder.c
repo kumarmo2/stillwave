@@ -202,11 +202,23 @@ static int publish(Session *s) {
     av_frame_unref(s->frame); av_frame_unref(s->download);
     if (s->frames == 1 && d->profile)
         fprintf(stderr, "[%s/ffmpeg] first frame ready decoding=%s format=%d (GPU color conversion)\n", d->label, s->cuda ? "cuda" : "software", format);
-    if (d->paused) {
-        pthread_mutex_lock(&d->mutex);
-        while (!canceled(d)) pthread_cond_wait(&d->cond, &d->mutex);
-        pthread_mutex_unlock(&d->mutex);
-        return AVERROR_EXIT;
+    int64_t pause_start = now_ns();
+    pthread_mutex_lock(&d->mutex);
+    bool waited = false;
+    while (d->paused && !canceled(d)) {
+        waited = true;
+        pthread_cond_wait(&d->cond, &d->mutex);
+    }
+    pthread_mutex_unlock(&d->mutex);
+    if (canceled(d)) return AVERROR_EXIT;
+    // Staging holds the first frame. Shift its clock by the pause duration
+    // so activation neither catches up nor drops the first frame's interval.
+    if (waited) {
+        int64_t delay = now_ns() - pause_start;
+        if (s->clock_origin > INT64_MAX - delay || s->last_target > INT64_MAX - delay)
+            return AVERROR_INVALIDDATA;
+        s->clock_origin += delay;
+        s->last_target += delay;
     }
     return 0;
 }
@@ -324,6 +336,12 @@ SWDecoder *sw_decoder_create(const char *path, int loop, int paused, int hw_auto
     return d;
 mutex: pthread_mutex_destroy(&d->mutex);
 strings: free(d->path); free(d->label); free(d); return NULL;
+}
+void sw_decoder_paused(SWDecoder *d, int paused) {
+    pthread_mutex_lock(&d->mutex);
+    d->paused = paused != 0;
+    pthread_cond_broadcast(&d->cond);
+    pthread_mutex_unlock(&d->mutex);
 }
 void sw_decoder_visibility(SWDecoder *d, int visible) {
     pthread_mutex_lock(&d->mutex);

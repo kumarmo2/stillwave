@@ -132,6 +132,7 @@ zig build test
 python3 tests/cli.py
 python3 tests/control.py          # mpv regression/lifecycle
 python3 tests/ffmpeg.py           # FFmpeg integration + native shader tests
+python3 tests/replacement.py      # set-video, persistence/failure/hidden/multi-output
 ```
 
 The FFmpeg tests use real software decoding, forced Mesa/llvmpipe, fake Wayland,
